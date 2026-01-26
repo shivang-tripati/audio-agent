@@ -1,0 +1,10 @@
+{
+    "device_id": "test-device-001",
+    "branch_id": "test-branch",
+    "server_url": "http://localhost:5000",
+    "token": "test-token-123",
+    "master_volume": 80,
+    "branch_volume": 90,
+    "heartbeat_interval": 45,
+    "auto_start": true
+}
