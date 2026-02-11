@@ -9,14 +9,16 @@ import threading
 from pathlib import Path
 from datetime import datetime
 import traceback
+import requests
 
 # Core modules
 from watchdog import Watchdog
 from audio_controller import AudioController
-from volume_controller import VolumeController
+from volume_controller_factory import get_volume_controller
 from server_client import ServerClient
 from scheduler import AudioScheduler
 from config_manager import ConfigManager
+from agent.device_identity import get_device_identity
 
 
 # --------------------------------------------------
@@ -75,14 +77,65 @@ class AudioAgent:
     def initialize(self):
         try:
             logger.info("Initializing Audio Agent...")
+            identity = get_device_identity()
+            logger.info(f"Device Identity: {identity}")
 
             # Config
             self.config = ConfigManager()
-            logger.info(f"Device ID: {self.config.device_id}")
-            logger.info(f"Branch ID: {self.config.branch_id}")
+
+            if not self.config.token:
+                device_code = input("Enter Device Code from Admin Panel: ").strip()
+
+                if not device_code:
+                    logger.error("Device code is required for activation.")
+                    return False
+
+                payload = {
+                    "device_code": device_code,
+                    "device_uuid": identity["device_uuid"],
+                    "device_fingerprint": identity["device_fingerprint"],
+                    "host_name": identity["host_name"]
+                }
+
+
+                logger.info(f"Attempting to activate with code: {device_code}")
+                logger.info(f"Payload: {payload}")
+
+
+                try:
+                    res = requests.post(
+                        f"{self.config.server_url}/api/devices/activate",
+                        json=payload,
+                        timeout=10
+                    )
+                    
+                    if res.status_code != 200:
+                        raise Exception(res.text)
+
+                    data = res.json()["data"]
+                    new_token = data.get('token')
+                    new_branch = data.get('branch_id')
+                        
+                    self.config.update_server_settings(
+                        token=new_token,
+                        branch_id=new_branch
+                    )
+
+                    # Update the client with the fresh token and connect
+                    self.server_client.token = self.config.token 
+                    self.server_client.connect() # <--- Must be indented correctly
+                    
+                    logger.info("Device activated and configured successfully!")
+                    
+                except requests.exceptions.RequestException as e:
+                    logger.error(f"Could not connect to server for activation: {e}")
+                    return False
+                except Exception as e:
+                    logger.error(f"Activation logic failed: {e}")
+                    return False
 
             # Volume controller
-            self.volume_controller = VolumeController()
+            self.volume_controller = get_volume_controller()
             logger.info("Volume controller initialized")
 
             # Audio controller
@@ -109,8 +162,6 @@ class AudioAgent:
             # Server client
             self.server_client = ServerClient(
                 base_url=self.config.server_url,
-                device_id=self.config.device_id,
-                branch_id=self.config.branch_id,
                 token=self.config.token,
                 on_volume_update=self._on_volume_update,
                 on_play_command=self._on_play_command,
@@ -234,14 +285,11 @@ class AudioAgent:
     # Heartbeat
     # --------------------------------------------------
     def _send_heartbeat(self):
-        payload = {
-            "deviceId": self.config.device_id,
-            "branchId": self.config.branch_id,
-            "status": self.current_status,
-            "currentAudio": self.current_audio,
-            "finalVolume": self.final_volume
-        }
-        self.server_client.send_heartbeat(payload)
+        self.server_client.send_heartbeat(
+            self.current_status,
+            self.current_audio,
+            self.final_volume
+        )
 
     # --------------------------------------------------
     # Volume handling
@@ -277,6 +325,8 @@ class AudioAgent:
         self.audio_controller.stop()
 
     def _on_schedule_update(self, schedule_data):
+        logger.info("Received schedule update from server.")
+        self.audio_controller.sync_schedule_files(schedule_data, self.config.server_url)
         self.scheduler.update_schedule(schedule_data)
         self.config.save_schedule(schedule_data)
 
@@ -292,17 +342,42 @@ class AudioAgent:
     # --------------------------------------------------
     def _on_scheduled_play(self, schedule_item):
         if self.current_status == "PLAYING":
+            logger.info("Ignoring play command: Already playing.")
             return
 
-        audio_name = schedule_item.get("audio_name")
-        audio_url = schedule_item.get("audio_url")
+        # Extract data from your newly fixed JSON
+        audio_data = schedule_item.get("audio", {})
+        play_count = int(schedule_item.get("play_count", 1))
+        duration = int(audio_data.get("duration_seconds", 0))
+        audio_id = str(audio_data.get("id"))
+        audio_title = audio_data.get("title")
 
-        path = self.audio_controller.get_cached_audio(audio_name)
-        if not path and audio_url:
-            path = self.audio_controller.download_audio(audio_url, audio_name)
+        path = self.audio_controller.get_cached_audio(audio_id)
 
         if path:
-            self.audio_controller.play(path, audio_name)
+            def playback_worker():
+                self.current_status = "PLAYING"
+                try:
+                    for i in range(play_count):
+                        logger.info(f"🔄 Playing {audio_title} ({i+1}/{play_count})")
+                        self.audio_controller.play(path, audio_title)
+                        
+                        # Wait for the song to finish using the duration + 2s buffer
+                        # This avoids VLC freezing the main thread
+                        time.sleep(duration + 2)
+                        
+                    logger.info(f"✅ Finished all repeats for {audio_title}")
+                except Exception as e:
+                    logger.error(f"Playback loop error: {e}")
+                finally:
+                    self.current_status = "IDLE"
+                    self._send_heartbeat()
+
+            # Start background thread
+            import threading
+            threading.Thread(target=playback_worker, daemon=True).start()
+        else:
+            logger.error(f"❌ Audio file {audio_id} not found in cache.")
 
     # --------------------------------------------------
     # Playback callbacks
@@ -329,7 +404,7 @@ class AudioAgent:
 # --------------------------------------------------
 def main():
     logger.info("=" * 60)
-    logger.info("Windows Audio Agent Starting")
+    logger.info("Audio Agent Starting")
     logger.info("=" * 60)
 
     agent = AudioAgent()

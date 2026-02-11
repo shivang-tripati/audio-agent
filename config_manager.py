@@ -63,10 +63,10 @@ class ConfigManager:
     def _create_default_config(self):
         """Create default configuration"""
         return {
-            "device_id": str(uuid.uuid4()),
-            "branch_id": "UNASSIGNED",
-            "server_url": "http://127.0.0.1:5000",
-            "token": "CHANGE_ME",
+            "branch_id": None,
+            "device_id": None,
+            "server_url": "http://127.0.0.1:3000",
+            "token": None,
             "master_volume": 100,
             "branch_volume": 100,
             "heartbeat_interval": 45,

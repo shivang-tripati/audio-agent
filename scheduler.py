@@ -54,6 +54,9 @@ class AudioScheduler:
     
     def check_and_execute(self):
         """Check schedule and execute due items"""
+        
+        logger.debug(f"[SCHEDULER] tick {datetime.now().strftime('%H:%M:%S')} schedule_count={len(self.schedule)}")
+
         if not self.schedule:
             return
         
@@ -67,27 +70,32 @@ class AudioScheduler:
                 # Skip if disabled
                 if not item.get('enabled', True):
                     continue
+
+                play_count = int(item.get("play_count", 1))
                 
                 # Check if already executed (prevent duplicate plays)
                 item_id = item.get('id')
-                execution_key = f"{item_id}_{current_date}"
+                for count in range(play_count):
+                    execution_key = f"{item_id}_{current_date}_{count}"
+
+                    if execution_key in self.executed_items:
+                        continue
                 
-                if execution_key in self.executed_items:
-                    continue
-                
-                # Check if should play now
-                if self._should_play(item, now, current_time, current_date, current_weekday):
-                    logger.info(f"Triggering scheduled item: {item.get('audio_name')}")
+                    # Check if should play now
+                    if self._should_play(item, now, current_time, current_date, current_weekday):
+                        
+                        audio_title = item.get('audio', {}).get('title', 'Unknown')
+                        logger.info(f"Triggering scheduled item: {audio_title}")
+                        
+                        # Mark as executed
+                        self.executed_items.add(execution_key)
                     
-                    # Mark as executed
-                    self.executed_items.add(execution_key)
+                        # Trigger callback
+                        if self.on_scheduled_play:
+                            self.on_scheduled_play(item)
                     
-                    # Trigger callback
-                    if self.on_scheduled_play:
-                        self.on_scheduled_play(item)
-                    
-                    # Clean old execution keys (keep only today's)
-                    self._cleanup_executed_items(current_date)
+                        # Clean old execution keys (keep only today's)
+                        self._cleanup_executed_items(current_date)
                     
             except Exception as e:
                 logger.error(f"Error processing schedule item: {e}")
@@ -107,28 +115,29 @@ class AudioScheduler:
             bool: True if should play now
         """
         schedule_type = item.get('schedule_type', 'once')
-        scheduled_time = item.get('time', '00:00')
+        scheduled_time_raw = item.get('play_time', '00:00:00')
+        scheduled_time = ":".join(scheduled_time_raw.split(":")[:2])
         
         # Time must match (with 1-minute tolerance)
         if not self._time_matches(current_time, scheduled_time):
             return False
         
-        # Check based on schedule type
-        if schedule_type == 'daily':
-            return True
+        # # Check based on schedule type
+        # if schedule_type == 'daily':
+        #     return True
         
-        elif schedule_type == 'weekly':
-            days = item.get('days', [])
-            return current_weekday in days
+        # elif schedule_type == 'weekly':
+        #     days = item.get('days', [])
+        #     return current_weekday in days
         
-        elif schedule_type == 'once':
-            scheduled_date = item.get('date', '')
-            if not scheduled_date:
-                # Assume today if date missing
-                return True
-            return current_date == scheduled_date
+        # elif schedule_type == 'once':
+        #     scheduled_date = item.get('date', '')
+        #     if not scheduled_date:
+        #         # Assume today if date missing
+        #         return True
+        #     return current_date == scheduled_date
         
-        return False
+        return True
     
     def _time_matches(self, current_time, scheduled_time):
         """

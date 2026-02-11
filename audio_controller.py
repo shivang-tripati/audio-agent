@@ -167,3 +167,51 @@ class AudioController:
             "current_audio": self.current_audio_name,
             "state": str(self.player.get_state())
         }
+
+    # --------------------------------------------------
+    # Schedule Sync (The Missing Link)
+    # --------------------------------------------------
+    def sync_schedule_files(self, schedules, server_url):
+        """
+        Processes a list of schedules and ensures all required audio files are downloaded.
+        """
+        downloaded_count = 0
+        failed_count = 0
+        skipped_count = 0
+
+        for item in schedules:
+            audio = item.get('audio')
+            if not audio:
+                continue
+
+            audio_id = audio.get('id')
+            audio_title = audio.get('title')
+            relative_url = audio.get('file_url')
+
+            # 1. Clean up the URL
+            # If backend sends 'uploads/audio/xyz.mp3', prepend server_url
+            if relative_url.startswith('http'):
+                full_url = relative_url
+            else:
+                full_url = f"{server_url.rstrip('/')}/{relative_url.lstrip('/')}"
+
+            # 2. Check if we already have it
+            # We use the audio ID as the filename to avoid title conflicts
+            cached_path = self.get_cached_audio(str(audio_id))
+
+            if cached_path:
+                logger.debug(f"Audio already cached: {audio_title} (ID: {audio_id})")
+                skipped_count += 1
+                continue
+
+            # 3. Download if missing
+            logger.info(f"Missing file detected for: {audio_title}. Starting download...")
+            result = self.download_audio(full_url, str(audio_id))
+
+            if result:
+                downloaded_count += 1
+            else:
+                failed_count += 1
+
+        logger.info(f"Sync Complete: Downloaded: {downloaded_count}, Failed: {failed_count}, Skipped: {skipped_count}")
+        return failed_count == 0

@@ -1,23 +1,39 @@
 # Windows Audio Agent - Python Dependencies
 
-# Audio playback
+# # Audio playback
+# python-vlc==3.0.18121
+
+# # Windows volume control
+# pycaw==20230407
+
+# # HTTP requests
+# requests==2.31.0
+
+# # WebSocket client
+# websocket-client==1.6.4
+
+# # Windows COM support (required by pycaw)
+# comtypes==1.4.1
+
+# # PyInstaller for exe packaging
+# pyinstaller>=6.3.0
+
+# # Optional: System tray icon support
+# pystray==0.19.5
+# Pillow==10.1.0
+
+
+# Audio playback (Cross-platform)
 python-vlc==3.0.18121
 
-# Windows volume control
-pycaw==20230407
+# Linux volume control (Replaces pycaw)
+pulsectl==23.5.2
 
-# HTTP requests
+# Networking
 requests==2.31.0
-
-# WebSocket client
 websocket-client==1.6.4
 
-# Windows COM support (required by pycaw)
-comtypes==1.4.1
-
-# PyInstaller for exe packaging
+# UI and Packaging
 pyinstaller>=6.3.0
-
-# Optional: System tray icon support
 pystray==0.19.5
 Pillow==10.1.0
