@@ -8,9 +8,11 @@ from PIL import Image, ImageDraw
 import pystray
 from pystray import MenuItem as item
 import threading
+import platform
 
 logger = logging.getLogger(__name__)
 
+IS_WINDOWS = platform.system() == "Windows"
 
 class SystemTray:
     """Optional system tray icon for status visibility"""
@@ -22,7 +24,12 @@ class SystemTray:
         self.enabled = False
         
     def start(self):
+        if self.enabled:
+            return
         """Start system tray icon"""
+        if not IS_WINDOWS:
+            logger.info("System tray not supported on this OS.")
+            return
         try:
             # Create icon image
             image = self._create_icon()
@@ -42,6 +49,10 @@ class SystemTray:
                 "Audio Agent",
                 menu
             )
+            if self.enabled:
+                return
+            
+            self.icon.visible = True
             
             # Run in separate thread
             tray_thread = threading.Thread(target=self.icon.run, daemon=True)
@@ -89,6 +100,8 @@ class SystemTray:
             )
             
             self.icon.menu = menu
+            self.icon.title = f"Audio Agent - {status}"
+
             
             # Update icon image based on status
             if status == "PLAYING":

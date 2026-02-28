@@ -3,10 +3,36 @@
 PyInstaller Specification File for Audio Agent
 Provides advanced build configuration and optimization
 """
+# -*- mode: python ; coding: utf-8 -*-
+
+import os
+from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
 
-# Analysis - what files to include
+hidden_imports = []
+hidden_imports += collect_submodules('socketio')
+hidden_imports += collect_submodules('engineio')
+hidden_imports += collect_submodules('websocket')
+
+hidden_imports += collect_submodules('pycaw')
+hidden_imports += ['win32timezone']
+hidden_imports += collect_submodules('tkinter')
+hidden_imports += collect_submodules('tkinter')
+hidden_imports += collect_submodules('comtypes')
+hidden_imports += ['comtypes.stream']
+
+hidden_imports += ['vlc']
+
+hidden_imports += collect_submodules('requests')
+hidden_imports += collect_submodules('charset_normalizer')
+hidden_imports += collect_submodules('chardet')
+hidden_imports += collect_submodules('urllib3')
+hidden_imports += collect_submodules('idna')
+hidden_imports += collect_submodules('certifi')
+hidden_imports += collect_submodules('ctypes')
+hidden_imports += collect_submodules('asyncio')
+
 a = Analysis(
     ['main.py'],
     pathex=[],
@@ -14,34 +40,15 @@ a = Analysis(
     datas=[
         ('requirements.txt', '.'),
     ],
-    hiddenimports=[
-        'comtypes',
-        'comtypes.stream',
-        'pycaw',
-        'pycaw.pycaw',
-        'vlc',
-        'websocket',
-        'requests',
-        'json',
-        'threading',
-        'logging',
-        'pathlib',
-        'datetime',
-        'uuid',
-        'time',
-        'ctypes',
-    ],
+    hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        'tkinter',
         'matplotlib',
         'numpy',
         'pandas',
         'scipy',
-        'PIL',
-        'pyqt5',
         'PyQt5',
         'unittest',
     ],
@@ -51,14 +58,12 @@ a = Analysis(
     noarchive=False,
 )
 
-# PYZ - Python zip archive
 pyz = PYZ(
     a.pure,
     a.zipped_data,
     cipher=block_cipher
 )
 
-# EXE - Executable configuration
 exe = EXE(
     pyz,
     a.scripts,
@@ -70,14 +75,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=False,  # No console window
-    disable_windowed_traceback=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
+    upx=False,  # safer for audio libraries
+    console=False,  # no terminal
     icon='icon.ico' if os.path.exists('icon.ico') else None,
-    version_file='version_info.txt' if os.path.exists('version_info.txt') else None,
 )

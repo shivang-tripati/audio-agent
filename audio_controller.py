@@ -4,12 +4,13 @@ Uses VLC for reliable audio playback (Windows-safe)
 """
 
 import logging
+import re
 import threading
 import time
 import requests
 from pathlib import Path
 import vlc
-
+import sys
 logger = logging.getLogger(__name__)
 
 
@@ -25,14 +26,18 @@ class AudioController:
         self.on_playback_end = on_playback_end
         self.on_playback_error = on_playback_error
 
-        # VLC instance (Windows-safe flags)
-        self.instance = vlc.Instance(
-            "--no-video",
-            "--quiet",
-            "--no-xlib",
-            "--no-sub-autodetect-file"
-        )
-        self.player = self.instance.media_player_new()
+        # VLC instance
+        try:
+            self.instance = vlc.Instance(
+                "--no-video",
+                "--quiet",
+                "--no-xlib",
+                "--no-sub-autodetect-file"
+            )
+            self.player = self.instance.media_player_new()
+        except Exception as e:
+            logger.error(f"VLC initialization failed: {e}")
+            raise RuntimeError("VLC initialization failed.")
 
         # State
         self.is_playing = False
@@ -40,20 +45,24 @@ class AudioController:
         self.stop_monitoring = False
         self.monitor_thread = None
 
-        logger.info(f"Audio controller initialized. Cache dir: {self.cache_dir}")
+        logger.info(
+            f"Audio controller initialized. Cache dir: {self.cache_dir}")
 
     # --------------------------------------------------
     # Downloading
     # --------------------------------------------------
     def download_audio(self, url, audio_name):
         try:
-            logger.info(f"Downloading audio: {audio_name}")
 
-            extension = Path(url).suffix or ".mp3"
+            clean_url = re.sub(r'([^:])//+', r'\1/', url)
+            logger.info(f"Downloading from cleaned URL: {clean_url}")
+
+            # 2. Use clean_url for the extension and the request
+            extension = Path(clean_url).suffix or ".mp3"
             final_path = self.cache_dir / f"{audio_name}{extension}"
             temp_path = final_path.with_suffix(".tmp")
 
-            with requests.get(url, stream=True, timeout=60) as response:
+            with requests.get(clean_url, stream=True, timeout=60) as response:
                 response.raise_for_status()
                 with open(temp_path, "wb") as f:
                     for chunk in response.iter_content(chunk_size=8192):
@@ -78,7 +87,11 @@ class AudioController:
     # --------------------------------------------------
     # Playback
     # --------------------------------------------------
-    def play(self, audio_path, audio_name):
+    def play(self, audio_path, audio_name, seek_ms: int = 0):
+        """
+        Play audio file.
+        seek_ms: start playback from this position (milliseconds).
+        """
         try:
             self.stop()
 
@@ -86,7 +99,8 @@ class AudioController:
             if not audio_path.exists():
                 raise FileNotFoundError(audio_path)
 
-            logger.info(f"Playing audio: {audio_name}")
+            logger.info(f"Playing: {audio_name}" +
+                        (f" from {seek_ms}ms" if seek_ms > 0 else ""))
 
             media = self.instance.media_new(str(audio_path))
             self.player.set_media(media)
@@ -97,6 +111,18 @@ class AudioController:
             state = self.player.get_state()
 
             if state in (vlc.State.Playing, vlc.State.Opening):
+                # Seek if requested
+                if seek_ms > 0:
+                    # Wait for media to be fully opened before seeking
+                    for _ in range(20):
+                        if self.player.get_state() == vlc.State.Playing:
+                            self.player.set_time(seek_ms)
+                            break
+                        time.sleep(0.2)
+                    self.player.set_time(seek_ms)
+                    logger.info(
+                        f"Seeked to {seek_ms}ms for audio: {audio_name}")
+
                 self.is_playing = True
                 self.current_audio_name = audio_name
 
@@ -122,9 +148,37 @@ class AudioController:
             self.is_playing = False
             self.current_audio_name = None
 
+    def pause(self):
+        """Pause current playback (VLC pause)"""
+        if self.is_playing:
+            self.player.pause()
+            logger.info(f"Playback paused: {self.current_audio_name}")
+
+    def resume(self):
+        """Resume paused playback (VLC play)"""
+        self.player.play()
+        logger.info(f"Playback resumed: {self.current_audio_name}")
+
+    def get_position_ms(self) -> int:
+        """Get current playback position in milliseconds"""
+        try:
+            return self.player.get_time()  # VLC return ms
+        except Exception as e:
+            logger.error(f"Failed to get playback position: {e}")
+            return 0
+
+    def get_duration_ms(self) -> int:
+        """Get total duration of the current media in milliseconds"""
+        try:
+            return self.player.get_length()  # VLC return ms
+        except Exception as e:
+            logger.error(f"Failed to get media duration: {e}")
+            return 0
+
     # --------------------------------------------------
     # Monitoring
     # --------------------------------------------------
+
     def _start_monitoring(self, audio_name):
         self.stop_monitoring = False
         self.monitor_thread = threading.Thread(
@@ -165,6 +219,7 @@ class AudioController:
         return {
             "is_playing": self.is_playing,
             "current_audio": self.current_audio_name,
+            "position_ms": self.get_position_ms(),
             "state": str(self.player.get_state())
         }
 
@@ -200,12 +255,14 @@ class AudioController:
             cached_path = self.get_cached_audio(str(audio_id))
 
             if cached_path:
-                logger.debug(f"Audio already cached: {audio_title} (ID: {audio_id})")
+                logger.debug(
+                    f"Audio already cached: {audio_title} (ID: {audio_id})")
                 skipped_count += 1
                 continue
 
             # 3. Download if missing
-            logger.info(f"Missing file detected for: {audio_title}. Starting download...")
+            logger.info(
+                f"Missing file detected for: {audio_title}. Starting download...")
             result = self.download_audio(full_url, str(audio_id))
 
             if result:
@@ -213,5 +270,6 @@ class AudioController:
             else:
                 failed_count += 1
 
-        logger.info(f"Sync Complete: Downloaded: {downloaded_count}, Failed: {failed_count}, Skipped: {skipped_count}")
+        logger.info(
+            f"Sync Complete: Downloaded: {downloaded_count}, Failed: {failed_count}, Skipped: {skipped_count}")
         return failed_count == 0

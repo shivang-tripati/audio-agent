@@ -1,7 +1,12 @@
+"""
+Server Client
+Enhanced with PLAYLIST_UPDATE socket command support.
+"""
 import socketio
 import logging
 
 logger = logging.getLogger(__name__)
+
 
 class ServerClient:
     def __init__(self, base_url, token,
@@ -9,7 +14,8 @@ class ServerClient:
                  on_play_command=None,
                  on_stop_command=None,
                  on_schedule_update=None,
-                 on_audio_download=None
+                 on_audio_download=None,
+                 on_playlist_update=None
                  ):
 
         self.base_url = base_url
@@ -20,11 +26,13 @@ class ServerClient:
         self.on_stop_command = on_stop_command
         self.on_schedule_update = on_schedule_update
         self.on_audio_download = on_audio_download
+        self.on_playlist_update = on_playlist_update
 
         self.sio = socketio.Client(
             reconnection=True,
             reconnection_attempts=0,
-            reconnection_delay=3
+            reconnection_delay=5,
+            reconnection_delay_max=30
         )
 
         self.sio.on("connect", self._on_connect)
@@ -41,7 +49,7 @@ class ServerClient:
                 transports=["websocket"]
             )
             return True  # This must be INSIDE the try block
-        except Exception as e: # This MUST follow the try block
+        except Exception as e:  # This MUST follow the try block
             logger.error(f"Socket connect failed: {e}")
             return False
 
@@ -60,6 +68,11 @@ class ServerClient:
     def _on_command(self, data):
         t = data.get("type")
 
+        if t == "PLAYLIST_UPDATE" and self.on_playlist_update:
+            logger.info(
+                f"[Socket] PLAYLIST_UPDATE received: {len(data.get('playlist', []))} tracks")
+            self.on_playlist_update(data["playlist"])
+
         if t == "PLAY" and self.on_play_command:
             self.on_play_command(data["audio"])
 
@@ -75,11 +88,13 @@ class ServerClient:
         elif t == "DOWNLOAD_AUDIO" and self.on_audio_download:
             self.on_audio_download(data["audio"])
 
-
-    def send_heartbeat(self, status, current_audio, volume):
+    def send_heartbeat(self, status, current_audio, volume, mode="IDLE", audio_id=None, position_ms=0):
         if self.sio.connected:
             self.sio.emit("heartbeat", {
                 "status": status,
                 "current_audio": current_audio,
-                "volume": volume
+                "volume": volume,
+                "mode": mode,
+                "audio_id": audio_id,
+                "position_ms": position_ms
             })
