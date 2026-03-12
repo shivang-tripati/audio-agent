@@ -1,8 +1,10 @@
+import subprocess
 import tkinter as tk
 from tkinter import messagebox
 import requests
 from agent.device_identity import get_device_identity
 from config_manager import ConfigManager
+
 
 class ActivationWindow:
     def __init__(self):
@@ -73,8 +75,8 @@ class ActivationWindow:
                 "Device activated successfully.\n\n"
                 "Audio Agent will now run in background."
             )
+            subprocess.run(["sc", "start", "AudioAgentService"])
             self.root.destroy()
-
 
         except Exception as e:
             messagebox.showerror("Activation Failed", str(e))

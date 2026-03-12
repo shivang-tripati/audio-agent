@@ -1,11 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""
-PyInstaller Specification File for Audio Agent
-Provides advanced build configuration and optimization
-"""
-# -*- mode: python ; coding: utf-8 -*-
 
 import os
+import sys
 from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
@@ -18,11 +14,12 @@ hidden_imports += collect_submodules('websocket')
 hidden_imports += collect_submodules('pycaw')
 hidden_imports += ['win32timezone']
 hidden_imports += collect_submodules('tkinter')
-hidden_imports += collect_submodules('tkinter')
 hidden_imports += collect_submodules('comtypes')
 hidden_imports += ['comtypes.stream']
 
 hidden_imports += ['vlc']
+hidden_imports += ['charset_normalizer.md']
+hidden_imports += collect_submodules('win32')
 
 hidden_imports += collect_submodules('requests')
 hidden_imports += collect_submodules('charset_normalizer')
@@ -33,17 +30,22 @@ hidden_imports += collect_submodules('certifi')
 hidden_imports += collect_submodules('ctypes')
 hidden_imports += collect_submodules('asyncio')
 
+
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
+    binaries=[
+        ('vlc/libvlc.dll', 'vlc'),
+        ('vlc/libvlccore.dll', 'vlc'),
+    ],
     datas=[
         ('requirements.txt', '.'),
+        ('vlc/plugins', 'vlc/plugins'),
     ],
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=['hooks/vlc_runtime_hook.py'],
     excludes=[
         'matplotlib',
         'numpy',
@@ -71,11 +73,22 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
+    exclude_binaries=True,
     name='AudioAgent',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=False,  # safer for audio libraries
-    console=False,  # no terminal
-    icon='icon.ico' if os.path.exists('icon.ico') else None,
+    upx=False,
+    console=False,
+    icon='icon.ico'
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.zipfiles,
+    a.datas,
+    strip=False,
+    upx=False,
+    name='AudioAgent'
 )

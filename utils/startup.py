@@ -3,55 +3,88 @@ import sys
 import win32com.client
 
 
-def add_to_startup():
+SHORTCUT_NAME = "AudioAgent.lnk"
 
-    startup_folder = os.path.join(
+
+def get_startup_folder():
+
+    return os.path.join(
+
         os.environ["APPDATA"],
+
         r"Microsoft\Windows\Start Menu\Programs\Startup"
+
     )
 
-    shortcut_path = os.path.join(startup_folder, "AudioAgent.lnk")
 
-    # Get actual exe path
+def get_exe_path():
 
     if getattr(sys, 'frozen', False):
 
-        exe_path = sys.executable
+        return sys.executable
 
     else:
 
-        exe_path = os.path.abspath(sys.argv[0])
+        return os.path.abspath(sys.argv[0])
 
-    if os.path.exists(shortcut_path):
 
-        print("Startup shortcut already exists")
+def add_to_startup():
 
-        return
+    try:
 
-    shell = win32com.client.Dispatch("WScript.Shell")
+        startup_folder = get_startup_folder()
 
-    shortcut = shell.CreateShortCut(shortcut_path)
+        shortcut_path = os.path.join(startup_folder, SHORTCUT_NAME)
 
-    shortcut.Targetpath = exe_path
+        exe_path = get_exe_path()
 
-    shortcut.WorkingDirectory = os.path.dirname(exe_path)
+        # ✅ ALWAYS DELETE OLD SHORTCUT
 
-    shortcut.IconLocation = exe_path
+        if os.path.exists(shortcut_path):
 
-    shortcut.save()
+            os.remove(shortcut_path)
 
-    print("Startup shortcut created")
+            print("Old shortcut removed")
+
+        shell = win32com.client.Dispatch("WScript.Shell")
+
+        shortcut = shell.CreateShortCut(shortcut_path)
+
+        shortcut.TargetPath = exe_path
+
+        shortcut.WorkingDirectory = os.path.dirname(exe_path)
+
+        shortcut.Arguments = ""
+
+        shortcut.IconLocation = exe_path
+
+        shortcut.save()
+
+        print("Startup shortcut created:", exe_path)
+
+    except Exception as e:
+
+        print("Startup error:", e)
 
 
 def remove_from_startup():
 
-    startup_folder = os.path.join(
-        os.environ["APPDATA"],
-        r"Microsoft\Windows\Start Menu\Programs\Startup"
-    )
+    try:
 
-    shortcut_path = os.path.join(startup_folder, "AudioAgent.lnk")
+        shortcut_path = os.path.join(
 
-    if os.path.exists(shortcut_path):
+            get_startup_folder(),
 
-        os.remove(shortcut_path)
+            SHORTCUT_NAME
+
+        )
+
+        if os.path.exists(shortcut_path):
+
+            os.remove(shortcut_path)
+
+            print("Startup shortcut removed")
+
+    except Exception as e:
+
+        print("Remove error:", e)

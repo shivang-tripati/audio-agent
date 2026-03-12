@@ -3,42 +3,49 @@ Windows Audio Agent - Main Application
 Runs as background service, manages audio playback and volume control
 """
 
+from utils.logger import setup_logging
 import time
 import logging
 import threading
 from pathlib import Path
 from datetime import datetime
+import sys
+import traceback
+import multiprocessing
+
 
 # Core modules
-from watchdog import Watchdog
-from audio_controller import AudioController
+from agent.watchdog import Watchdog
+from agent.audio_controller import AudioController
 from volume_controller_factory import get_volume_controller
 from utils.vlc_checker import check_vlc_installed
 from utils.startup import add_to_startup
 from playlist.playlist_engine import PlaylistEngine, PlaylistState
-from server_client import ServerClient
-from scheduler import AudioScheduler
+from agent.server_client import ServerClient
+from agent.scheduler import AudioScheduler
 from config_manager import ConfigManager
 from agent.device_identity import get_device_identity
+from agent.playback_controller import PlaybackController
+from api.local_agent_api import LocalAgentAPI
 
+
+multiprocessing.freeze_support()  # For Windows support when using multiprocessing
 
 # --------------------------------------------------
 # Logging setup
 # --------------------------------------------------
-log_dir = Path("C:/ProgramData/AudioAgent/logs")
-log_dir.mkdir(parents=True, exist_ok=True)
-log_file = log_dir / f"agent_{datetime.now().strftime('%Y%m%d')}.log"
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler(log_file),
-        logging.StreamHandler()
-    ]
-)
-
+setup_logging("agent")
 logger = logging.getLogger(__name__)
+
+# Global exception handler
+
+
+def handle_exception(exc_type, exc_value, exc_traceback):
+    logger.error("Uncaught exception", exc_info=(
+        exc_type, exc_value, exc_traceback))
+
+
+sys.excepthook = handle_exception
 
 
 # --------------------------------------------------
@@ -49,6 +56,8 @@ class AudioAgent:
 
     def __init__(self):
         self.running = False
+        self.system_ready = False
+        self.start_time = time.time()
 
         self.watchdog = None
 
@@ -58,6 +67,7 @@ class AudioAgent:
         self.server_client = None
         self.scheduler = None
         self.playlist_engine = None
+        self.local_api = None
 
         # Heartbeat
         self.heartbeat_interval = 45
@@ -79,9 +89,6 @@ class AudioAgent:
         self.scheduler_thread = None
         self.reconnect_thread = None
 
-        from system_tray import SystemTray
-        self.tray = SystemTray(on_exit=self.stop)
-
     # --------------------------------------------------
     # Initialization
     # --------------------------------------------------
@@ -96,14 +103,6 @@ class AudioAgent:
             # 1️⃣ Load config first
             self.config = ConfigManager()
 
-            # 2️⃣ If no token → launch activation UI
-            if not self.config.token:
-                from ui.activation import ActivationWindow
-                ActivationWindow().run()
-
-            # Reload config after activation
-            self.config = ConfigManager()
-
             if not self.config.token:
                 logger.error("Activation failed or cancelled.")
                 return False
@@ -116,12 +115,25 @@ class AudioAgent:
             )
             logger.info("Audio controller initialized")
 
+            self.volume_controller = get_volume_controller()
+            logger.info("Volume controller initialized")
+
+            self.playback_controller = PlaybackController(
+                self.audio_controller)
+
             # NEW: Initialize playlist engine
             self.playlist_engine = PlaylistEngine(
+                playback_controller=self.playback_controller,
                 audio_controller=self.audio_controller,
+                config_manager=self.config,
                 on_track_start=self._on_playlist_track_start,
                 on_state_change=self._on_playlist_state_change
             )
+
+            # 2️⃣ Initialize local API
+            self.local_api = LocalAgentAPI(self)
+            logger.info("Local API initialized")
+            self.local_api.start()
 
             # 3️⃣ Now create server client (token guaranteed)
             self.server_client = ServerClient(
@@ -145,9 +157,6 @@ class AudioAgent:
             identity = get_device_identity()
             logger.info(f"Device Identity: {identity}")
 
-            self.volume_controller = get_volume_controller()
-            logger.info("Volume controller initialized")
-
             self.scheduler = AudioScheduler(
                 on_scheduled_play=self._on_scheduled_play
             )
@@ -156,12 +165,15 @@ class AudioAgent:
             saved_schedule = self.config.load_schedule()
             if saved_schedule:
                 logger.info("Loaded offline schedule from disk")
-                self.scheduler.update_schedule(saved_schedule)
+                if self.scheduler:
+                    self.scheduler.update_schedule(saved_schedule)
 
             self._apply_volume(
                 self.config.master_volume,
                 self.config.branch_volume
             )
+
+            self.system_ready = True
 
             logger.info("Audio Agent initialization complete")
             return True
@@ -205,7 +217,7 @@ class AudioAgent:
 
         try:
             while self.running:
-                time.sleep(1)
+                time.sleep(5)
         except KeyboardInterrupt:
             logger.info("Keyboard interrupt received")
             self.stop()
@@ -214,14 +226,14 @@ class AudioAgent:
         logger.info("Stopping Audio Agent...")
         self.running = False
 
+        if self.playlist_engine:
+            self.playlist_engine.stop()
+
         if self.audio_controller:
             self.audio_controller.stop()
 
         if self.server_client:
             self.server_client.disconnect()
-
-        if self.tray:
-            self.tray.stop()
 
         if self.watchdog:
             self.watchdog.stop()
@@ -252,12 +264,12 @@ class AudioAgent:
                     self.watchdog.notify_scheduler_tick()
             except Exception:
                 logger.exception("Scheduler error")
-            time.sleep(1)
+            time.sleep(5)
 
     def _connection_loop(self):
         while self.running:
             try:
-                if not self.server_client.is_connected():
+                if self.server_client and not self.server_client.is_connected():
                     logger.info("Connecting to server...")
                     if self.server_client.connect():
                         logger.info("Connected to server")
@@ -274,6 +286,10 @@ class AudioAgent:
     # Heartbeat
     # --------------------------------------------------
     def _send_heartbeat(self):
+
+        if not self.system_ready:
+            return
+
         mode = self._mode
         audio_id = None
         position_ms = 0
@@ -285,14 +301,24 @@ class AudioAgent:
         elif mode == "SCHEDULE":
             audio_id = self.current_audio
 
-        self.server_client.send_heartbeat(
-            status=self.current_status,
-            current_audio=self.current_audio,
-            volume=self.final_volume,
-            mode=mode,
-            audio_id=audio_id,
-            position_ms=position_ms
-        )
+        actual_volume = 0
+        if self.volume_controller:
+            try:
+                actual_volume = self.volume_controller.get_volume()
+            except Exception as e:
+                logger.error(f"Failed to get actual volume: {e}")
+
+        self.final_volume = actual_volume
+
+        if self.server_client:
+            self.server_client.send_heartbeat(
+                status=self.current_status,
+                current_audio=self.current_audio,
+                volume=actual_volume,
+                mode=mode,
+                audio_id=audio_id,
+                position_ms=position_ms
+            )
 
     # --------------------------------------------------
     # Volume handling
@@ -303,8 +329,8 @@ class AudioAgent:
 
     def _apply_volume(self, master_volume, branch_volume):
         final_volume = int((master_volume * branch_volume) / 100)
-        self.final_volume = final_volume
-        self.volume_controller.set_volume(final_volume)
+        if self.audio_controller:
+            self.audio_controller.set_volume(final_volume)
 
     # --------------------------------------------------
     # NEW: Playlist callbacks
@@ -319,11 +345,19 @@ class AudioAgent:
             f"[FM Radio] Received playlist update — {len(playlist)} tracks")
 
         # Download any missing tracks in background
-        threading.Thread(target=self._precache_playlist,
-                         args=(playlist,), daemon=True).start()
+        if not hasattr(self, "_precache_lock"):
+            self._precache_lock = threading.Lock()
+        if not self._precache_lock.locked():
+            self._precache_lock.acquire()
+            threading.Thread(
+                target=self._precache_playlist,
+                args=(playlist,),
+                daemon=True
+            ).start()
 
         # Update engine immediately with new playlist (will play cached tracks and skip missing ones, which will be added when download completes)
-        self.playlist_engine.update_playlist(playlist)
+        if self.playlist_engine:
+            self.playlist_engine.update_playlist(playlist)
 
     def _precache_playlist(self, playlist: list):
         """Download any playlist tracks not yet cached"""
@@ -338,11 +372,11 @@ class AudioAgent:
 
     def _on_playlist_track_start(self, track):
         logger.info(f"[Agent] Now playing playlist track: {track.title}")
+        self._apply_volume(self.config.master_volume,
+                           self.config.branch_volume)
         self.current_status = "PLAYING"
         self.current_audio = track.title
         self._mode = "PLAYLIST"
-        if self.tray:
-            self.tray.update_status("PLAYING", track.title)
         self._send_heartbeat()
 
     def _on_playlist_state_change(self, mode: str):
@@ -367,12 +401,15 @@ class AudioAgent:
             path = self.audio_controller.download_audio(audio_url, audio_name)
 
         if path:
-            self.audio_controller.play(path, audio_name)
+            self.playback_controller.manual_play(
+                path,
+                audio_name
+            )
 
     def _on_stop_command(self):
         if self.playlist_engine:
             self.playlist_engine.stop()
-        self.audio_controller.stop()
+        self.playback_controller.stop()
         self._mode = "IDLE"
         self.current_status = "IDLE"
 
@@ -380,7 +417,8 @@ class AudioAgent:
         logger.info("Received schedule update from server.")
         self.audio_controller.sync_schedule_files(
             schedule_data, self.config.server_url)
-        self.scheduler.update_schedule(schedule_data)
+        if self.scheduler:
+            self.scheduler.update_schedule(schedule_data)
         self.config.save_schedule(schedule_data)
 
     def _on_audio_download(self, audio_info):
@@ -443,8 +481,17 @@ class AudioAgent:
                 for i in range(play_count):
                     logger.info(
                         f"[Schedule] ▶ {audio_title} ({i+1}/{play_count})")
-                    self.audio_controller.play(path, audio_title)
-                    time.sleep(duration + 1.5)
+                    started = self.playback_controller.interrupt_for_schedule(
+                        path,
+                        audio_title
+                    )
+                    if not started:
+                        logger.error(
+                            f"[Schedule] Failed to play {audio_title} — aborting schedule")
+                        break
+                    # ⭐ CRITICAL FIX:
+                    # Wait for REAL playback completion instead of sleep(duration)
+                    self.wait_for_playback_completion(audio_title)
 
                 logger.info(f"[Schedule] ✅ Finished: {audio_title}")
 
@@ -452,21 +499,37 @@ class AudioAgent:
                 logger.error(f"[Schedule] Playback error: {e}")
 
             finally:
+                # --------------------------------------------------
+                # STEP 4: Resume playlist immediately
+                # --------------------------------------------------
                 with self._schedule_lock:
                     self._schedule_playing = False
 
-                self.current_status = "IDLE"
-                self.current_audio = None
+                    if self.playback_controller:
+                        self.playback_controller.clear_interrupt()
 
-                # Step 3: Resume playlist
+                # --------------------------------------------------
+                # STEP 5: Restore correct mode
+                # --------------------------------------------------
                 if saved_state and self.playlist_engine:
-                    logger.info(
-                        f"[Schedule] Resuming playlist from saved state")
-                    self.playlist_engine.resume_from_schedule(saved_state)
-                elif self.playlist_engine and self.playlist_engine.get_playlist():
-                    # Edge case: no saved state but playlist exists
-                    self.playlist_engine.start()
 
+                    self.playlist_engine.resume_from_schedule(saved_state)
+                    # Small delay to ensure state is applied before resuming
+                    time.sleep(0.4)
+                    self._mode = "PLAYLIST"
+                    self.current_status = "PLAYING"
+
+                elif self.playlist_engine and self.playlist_engine.get_playlist():
+                    self.playlist_engine.start()
+                    time.sleep(0.3)
+                    self._mode = "PLAYLIST"
+                    self.current_status = "PLAYING"
+
+                else:
+                    self._mode = "IDLE"
+                    self.current_status = "IDLE"
+
+                self.current_audio = None
                 self._send_heartbeat()
 
         threading.Thread(target=schedule_worker, daemon=True).start()
@@ -477,17 +540,37 @@ class AudioAgent:
     def _on_playback_start(self, audio_name):
         self.current_status = "PLAYING"
         self.current_audio = audio_name
-        if self.tray:
-            self.tray.update_status("PLAYING", audio_name)
         self._send_heartbeat()
 
     def _on_playback_end(self, audio_name):
-        # Only reset to IDLE if not in playlist mode (playlist engine manages its own state)
-        if self._mode != "PLAYLIST":
-            self.current_status = "IDLE"
-            self.current_audio = None
-            if self.tray:
-                self.tray.update_status("IDLE")
+        logger.info(f"[Agent] Playback ended: {audio_name}")
+
+    # --------------------------------------------------
+    # CRITICAL FIX:
+    # Ignore playback_end if schedule worker active
+    # --------------------------------------------------
+        if self._mode == "SCHEDULE":
+            logger.info(
+                "[Agent] Schedule playback ended — scheduler will resume playlist"
+            )
+            return
+
+    # --------------------------------------------------
+    # CRITICAL FIX:
+    # Ignore playback_end for playlist (playlist engine controls flow)
+    # --------------------------------------------------
+        if self._mode == "PLAYLIST":
+            logger.debug(
+                "[Agent] Playlist track ended — playlist engine advancing"
+            )
+            return
+
+    # --------------------------------------------------
+    # Only emergency/manual playback should set IDLE
+    # --------------------------------------------------
+        self.current_status = "IDLE"
+        self.current_audio = None
+
         self._send_heartbeat()
 
     def _on_playback_error(self, audio_name, error):
@@ -495,31 +578,28 @@ class AudioAgent:
         if self._mode != "PLAYLIST":
             self.current_status = "IDLE"
             self.current_audio = None
-            if self.tray:
-                self.tray.update_status("IDLE")
         self._send_heartbeat()
 
+    def wait_for_playback_completion(self, audio_name, timeout=3600):
+        start = time.time()
+        while self.running and self.audio_controller.is_playing:
+            if time.time() - start > timeout:
+                logger.warning(
+                    f"[Schedule] Timeout waiting for playback completion: {audio_name}")
+                break
+            time.sleep(0.2)
+        logger.info(
+            f"[Schedule] ✅ Schedule completed: {audio_name}"
+        )
 
 # --------------------------------------------------
 # Entry point
 # --------------------------------------------------
+
+
 def main():
+
     logger.info("Audio Agent Starting")
-
-    config = ConfigManager()
-
-    # FIRST RUN
-    if not config.token:
-        from ui.activation import ActivationWindow
-        ActivationWindow().run()
-
-        config = ConfigManager()
-        if not config.token:
-            logger.info("Activation cancelled. Exiting.")
-            return
-
-        # ✅ Register auto-start ONLY after success
-        add_to_startup()
 
     while True:
         try:
@@ -531,4 +611,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+
+    if "--worker" in sys.argv:
+        from worker_main import run_worker
+        run_worker()
+
+    else:
+        from supervisor import run_supervisor
+        run_supervisor()
