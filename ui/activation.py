@@ -75,7 +75,10 @@ class ActivationWindow:
                 "Device activated successfully.\n\n"
                 "Audio Agent will now run in background."
             )
-            subprocess.run(["sc", "start", "AudioAgentService"])
+            subprocess.run(["sc", "start", "AudioAgentService"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+            )
             self.root.destroy()
 
         except Exception as e:

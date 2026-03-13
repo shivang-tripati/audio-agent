@@ -1,17 +1,25 @@
+#WindowsService.spec
 # -*- mode: python ; coding: utf-8 -*-
 
 a = Analysis(
     ['service\\windows_service.py'],
     pathex=['.'],
     binaries=[],
-    datas=[],
+    datas=[
+        ('utils', 'utils'), 
+    ],
     hiddenimports=[
         'win32timezone',
         'win32service',
         'win32serviceutil',
         'servicemanager',
         'pythoncom',
-        'pywintypes'
+        'pywintypes',
+        'utils.logger',      # ← MISSING
+        'utils.single_instance',  # ← MISSING
+        'logging.handlers',  # ← MISSING
+        'subprocess',
+        'threading',
     ],
     hookspath=[],
     hooksconfig={},

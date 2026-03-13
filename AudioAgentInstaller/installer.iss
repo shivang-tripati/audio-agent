@@ -1,6 +1,6 @@
 #define MyAppName "AudioAgent"
-#define MyAppVersion "1.5"
-#define MyAppPublisher "ACS"
+#define MyAppVersion "1.2.0"
+#define MyAppPublisher "Shivang Tripathi"
 
 [Setup]
 AppId={{8A1C7E7A-9E2A-4E3B-8E3F-999999999999}
@@ -20,14 +20,12 @@ DisableProgramGroupPage=yes
 SetupIconFile=icon.ico
 
 [Dirs]
-
 Name: "{commonappdata}\AudioAgent"; Permissions: users-modify
 Name: "{commonappdata}\AudioAgent\logs"; Permissions: users-modify
 Name: "{commonappdata}\AudioAgent\config"; Permissions: users-modify
 Name: "{commonappdata}\AudioAgent\audio_cache"; Permissions: users-modify
 
 [Files]
-
 ; Install FULL build folder
 Source: "dist\AudioAgent\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion
 
@@ -35,14 +33,16 @@ Source: "dist\AudioAgent\*"; DestDir: "{app}"; Flags: recursesubdirs createallsu
 Source: "extras\vcredist_x64.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall
 
 [Icons]
-
 Name: "{group}\AudioAgent"; Filename: "{app}\AudioAgentUI.exe"
 Name: "{commondesktop}\AudioAgent"; Filename: "{app}\AudioAgentUI.exe"
 
 [Run]
-
 ; Stop any old running agent
 Filename: "{cmd}"; Parameters: "/C taskkill /F /IM AudioAgent.exe"; Flags: runhidden
+Filename: "{cmd}"; Parameters: "/C taskkill /F /IM AudioAgentUI.exe"; Flags: runhidden
+
+; ⭐ Create junction so app finds VLC in both locations
+Filename: "{cmd}"; Parameters: "/C if not exist ""{app}\vlc"" mklink /J ""{app}\vlc"" ""{app}\_internal\vlc"""; Flags: runhidden
 
 ; Install VC++ runtime if missing
 Filename: "{tmp}\vcredist_x64.exe"; Parameters: "/quiet /norestart"; StatusMsg: "Installing Microsoft VC++ Runtime..."; Flags: waituntilterminated; Check: ShouldInstallVC
@@ -63,34 +63,21 @@ Filename: "{app}\AudioAgentService.exe"; Parameters: "start"; StatusMsg: "Starti
 Filename: "{app}\AudioAgentUI.exe"; Flags: nowait
 
 [UninstallRun]
-
 Filename: "{app}\AudioAgentService.exe"; Parameters: "stop"; Flags: runhidden waituntilterminated; RunOnceId: "StopService"
-
 Filename: "{app}\AudioAgentService.exe"; Parameters: "remove"; Flags: runhidden waituntilterminated; RunOnceId: "RemoveService"
-
 Filename: "{cmd}"; Parameters: "/C taskkill /F /IM AudioAgent.exe"; Flags: runhidden; RunOnceId: "KillAgent"
 
 [Code]
-
 function InitializeSetup(): Boolean;
 var
   ResultCode: Integer;
 begin
-  Exec(
-    'taskkill',
-    '/F /IM AudioAgent.exe',
-    '',
-    SW_HIDE,
-    ewWaitUntilTerminated,
-    ResultCode
-  );
-
+  Exec('taskkill', '/F /IM AudioAgent.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill', '/F /IM AudioAgentUI.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Result := True;
 end;
 
 function ShouldInstallVC(): Boolean;
 begin
-  Result := not FileExists(
-    ExpandConstant('{sys}\msvcp140.dll')
-  );
+  Result := not FileExists(ExpandConstant('{sys}\msvcp140.dll'));
 end;

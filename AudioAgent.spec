@@ -7,6 +7,29 @@ from PyInstaller.utils.hooks import collect_submodules
 block_cipher = None
 
 hidden_imports = []
+hidden_imports += [
+    'utils.logger',
+    'utils.single_instance', 
+    'utils.vlc_checker',
+    'utils.startup',
+    'config_manager',
+    'agent_app',
+    'volume_controller_factory',
+    'volume_controller_windows',
+    'agent.audio_controller',
+    'agent.watchdog',
+    'agent.server_client',
+    'agent.scheduler',
+    'agent.device_identity',
+    'agent.playback_controller',
+    'playlist.playlist_engine',
+    'api.local_agent_api',
+    'worker_main',
+    'supervisor',
+    'machineid',
+    'wmi',
+    'psutil',
+]
 hidden_imports += collect_submodules('socketio')
 hidden_imports += collect_submodules('engineio')
 hidden_imports += collect_submodules('websocket')

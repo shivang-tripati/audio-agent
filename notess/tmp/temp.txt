@@ -1,0 +1,1 @@
+want to ask one question that when a ui start or done work like installed for the first it activation and starting the system tray and if already config manager has token then what it does , doe sit start the service worker super visior or anything what does it cuase  i did not get any logs after that

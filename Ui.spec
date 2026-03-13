@@ -1,3 +1,4 @@
+#Ui.spec
 # -*- mode: python ; coding: utf-8 -*-
 
 block_cipher = None
@@ -16,7 +17,15 @@ a = Analysis(
     datas=[
         ('icon.ico','.')
     ],
-    hiddenimports=hidden_imports,
+    hiddenimports=hidden_imports + [
+        'config_manager',
+        'utils.single_instance',
+        'utils.logger',
+        'utils.startup',
+        'agent.device_identity',
+        'ui.tray_app',
+        'ui.activation',   # ← add these explicitly
+    ],
 )
 
 pyz = PYZ(a.pure)

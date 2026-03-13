@@ -1,12 +1,19 @@
+# hooks/vlc_runtime_hook.py
 import os
 import sys
 
-if getattr(sys, "frozen", False):
-    base_dir = os.path.dirname(sys.executable)
-else:
-    base_dir = os.getcwd()
-
-vlc_path = os.path.join(base_dir, "vlc")
-
-os.environ["VLC_PLUGIN_PATH"] = os.path.join(vlc_path, "plugins")
-os.add_dll_directory(vlc_path)
+if getattr(sys, 'frozen', False):
+    base = os.path.dirname(sys.executable)
+    vlc_dir = os.path.join(base, 'vlc')
+    plugins_dir = os.path.join(vlc_dir, 'plugins')
+    
+    os.environ['VLC_PLUGIN_PATH'] = plugins_dir
+    os.environ['PATH'] = vlc_dir + os.pathsep + os.environ.get('PATH', '')
+    
+    # Delete stale cache so VLC rebuilds it cleanly
+    cache_file = os.path.join(vlc_dir, 'plugins.dat')
+    if os.path.exists(cache_file):
+        try:
+            os.remove(cache_file)
+        except Exception:
+            pass

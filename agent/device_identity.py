@@ -1,114 +1,114 @@
-import uuid
-import socket
-import hashlib
 import subprocess
-import platform
-import json
-from pathlib import Path
-import machineid
-
-# -------------------------
-# Persistent storage
-# -------------------------
-CONFIG_DIR = Path.home() / "AudioAgent" / "config"
-CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-IDENTITY_FILE = CONFIG_DIR / "identity.json"
+import uuid
+import hashlib
+import winreg
+import logging
+import socket
 
 
-def _load_identity():
-    if IDENTITY_FILE.exists():
-        with open(IDENTITY_FILE, "r") as f:
-            return json.load(f)
-    return {}
+logger = logging.getLogger(__name__)
 
 
-def _save_identity(data):
-    with open(IDENTITY_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-
-# -------------------------
-# Device UUID (once per install)
-# -------------------------
-def get_or_create_device_uuid():
-    data = _load_identity()
-
-    if "device_uuid" not in data:
-        data["device_uuid"] = str(uuid.uuid4())
-        _save_identity(data)
-
-    return data["device_uuid"]
-
-
-# -------------------------
-# MAC address
-# -------------------------
-def get_mac():
-    mac = uuid.getnode()
-    return ':'.join(f'{(mac >> ele) & 0xff:02x}' for ele in range(40, -1, -8))
-
-
-# -------------------------
-# Disk Serial
-# -------------------------
-def get_disk_serial():
+def get_registry_machine_guid():
+    """Get Windows Machine GUID from registry"""
     try:
-        if platform.system() == "Windows":
-            import wmi
-            c = wmi.WMI()
-            for disk in c.Win32_DiskDrive():
-                if disk.SerialNumber:
-                    return disk.SerialNumber.strip()
+        key = winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Cryptography"
+        )
+        value, _ = winreg.QueryValueEx(key, "MachineGuid")
+        return value
+    except Exception as e:
+        logger.warning(f"Registry MachineGuid failed: {e}")
+        return None
 
-        else:  # Linux / Ubuntu
-            out = subprocess.check_output("lsblk -ndo SERIAL", shell=True).decode().strip()
-            if out:
-                return out.split("\n")[0]
 
-    except:
-        pass
+def get_powershell_uuid():
+    """Get hardware UUID via PowerShell (modern Windows)"""
+    try:
+        result = subprocess.check_output(
+            ["powershell", "-Command", "(Get-CimInstance Win32_ComputerSystemProduct).UUID"],
+            text=True
+        ).strip()
+
+        if result:
+            return result
+    except Exception as e:
+        logger.warning(f"PowerShell UUID failed: {e}")
 
     return None
 
 
-# -------------------------
-# OS Machine ID (fallback)
-# -------------------------
-def get_os_machine_id():
+def get_wmic_uuid():
     try:
-        return machineid.id()
+        output = subprocess.check_output(
+            ["wmic", "csproduct", "get", "uuid"],
+            text=True
+        )
+
+        lines = [l.strip() for l in output.splitlines() if l.strip()]
+
+        if len(lines) >= 2:
+            return lines[1]
+
     except Exception as e:
-        logger.error(f"Failed to get OS machine ID: {e}")
+        logger.warning(f"WMIC UUID failed: {e}")
+
+    return None
+
+
+def get_mac():
+    try:
+        mac = uuid.getnode()
+        return ':'.join(('%012X' % mac)[i:i+2] for i in range(0, 12, 2))
+    except Exception as e:
+        logger.warning(f"MAC fetch failed: {e}")
         return None
 
+def get_os_machine_id():
+    """
+    Try multiple methods to get stable machine ID
+    """
+    for method in [
+        get_registry_machine_guid,
+        get_powershell_uuid,
+        get_wmic_uuid
+    ]:
+        value = method()
+        if value:
+            return value
 
-# -------------------------
-# Hostname
-# -------------------------
-def get_hostname():
-    return socket.gethostname()
+    # last fallback
+    return str(uuid.getnode())
 
 
-# -------------------------
-# Final Device Fingerprint
-# -------------------------
 def get_device_fingerprint():
-    mac = get_mac()
-    disk = get_disk_serial()
+    """
+    Create stable fingerprint for device
+    """
     os_id = get_os_machine_id()
-    hostname = get_hostname()
+    mac = get_mac()
 
-    base = f"{hostname}|{mac}|{disk or os_id}"
+    raw = f"{os_id}-{mac}"
 
-    return hashlib.sha256(base.encode()).hexdigest()
+    fingerprint = hashlib.sha256(raw.encode()).hexdigest()
+
+    return fingerprint
 
 
-# -------------------------
-# Collect everything
-# -------------------------
 def get_device_identity():
+    """
+    Return device identity used for activation
+    """
+    machine_id = get_os_machine_id()
+    mac = get_mac()
+    host_name = socket.gethostname()
+
+    fingerprint_raw = f"{machine_id}-{mac}-{host_name}"
+    fingerprint = hashlib.sha256(fingerprint_raw.encode()).hexdigest()
+
     return {
-        "device_uuid": get_or_create_device_uuid(),
-        "device_fingerprint": get_device_fingerprint(),
-        "host_name": get_hostname()
+        "device_uuid": machine_id,
+        "device_fingerprint": fingerprint,
+        "host_name": host_name
     }
