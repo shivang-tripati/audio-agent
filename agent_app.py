@@ -207,8 +207,14 @@ class AudioAgent:
         if self.playlist_engine:
             self.playlist_engine.stop()
 
+        if self.playback_controller:
+            self.playback_controller.stop()
+
         if self.audio_controller:
             self.audio_controller.stop()
+
+        if self.local_api:
+            self.local_api.stop()
 
         if self.server_client:
             self.server_client.disconnect()
@@ -251,7 +257,8 @@ class AudioAgent:
                     logger.info("Connecting to server...")
                     if self.server_client.connect():
                         logger.info("Connected to server")
-                        self.current_status = "IDLE"
+                        if self._mode == "IDLE":
+                            self.current_status = "IDLE"
                     else:
                         time.sleep(30)
                 else:
@@ -279,14 +286,23 @@ class AudioAgent:
         elif mode == "SCHEDULE":
             audio_id = self.current_audio
 
-        actual_volume = 0
+        # IMPORTANT: Always read volume from VolumeController if available, 
+        # as it represents the true "Internal Volume" (Windows Audio Session).
+        actual_volume = self.final_volume
         if self.volume_controller:
             try:
-                actual_volume = self.volume_controller.get_volume()
+                # Get the actual volume from the Windows audio session
+                self.final_volume = self.volume_controller.get_volume()
+                actual_volume = self.final_volume
+            except Exception:
+                # Fallback to last known volume if reading fails
+                pass
+        elif self.audio_controller:
+            try:
+                actual_volume = self.audio_controller.player.audio_get_volume()
+                self.final_volume = actual_volume
             except Exception as e:
                 logger.error(f"Failed to get actual volume: {e}")
-
-        self.final_volume = actual_volume
 
         if self.server_client:
             self.server_client.send_heartbeat(
@@ -305,11 +321,21 @@ class AudioAgent:
     def _on_volume_update(self, master_volume, branch_volume):
         self._apply_volume(master_volume, branch_volume)
         self.config.update_volumes(master_volume, branch_volume)
+        # Re-send heartbeat immediately to show the change on backend & UI
+        self._send_heartbeat()
 
     def _apply_volume(self, master_volume, branch_volume):
-        final_volume = int((master_volume * branch_volume) / 100)
+        self.final_volume = int((master_volume * branch_volume) / 100)
+        
+        # 1. Apply to internal VLC software volume
         if self.audio_controller:
-            self.audio_controller.set_volume(final_volume)
+            self.audio_controller.set_volume(self.final_volume)
+            
+        # 2. Apply to Windows Per-App Audio Session (the "Internal Volume")
+        if self.volume_controller:
+            self.volume_controller.set_volume(self.final_volume)
+            
+        # Don't call config.update_volumes here — causes infinite loop
 
     # --------------------------------------------------
     # Playlist callbacks
@@ -373,11 +399,14 @@ class AudioAgent:
         self._apply_volume(self.config.master_volume,
                            self.config.branch_volume)
         self.current_status = "PLAYING"
+        logger.info(f"CALLBACK: Status set to {self.current_status}")
         self.current_audio = track.title
         self._mode = "PLAYLIST"
         self._send_heartbeat()
 
     def _on_playlist_state_change(self, mode: str):
+        """Called when playlist state changes (play/pause/stop)"""
+        logger.info(f"CALLBACK: Playlist mode changed to {mode}")
         self._mode = mode
 
     # --------------------------------------------------
@@ -486,7 +515,7 @@ class AudioAgent:
 
                 if saved_state and self.playlist_engine:
                     self.playlist_engine.resume_from_schedule(saved_state)
-                    time.sleep(0.4)
+                    time.sleep(0.3)
                     self._mode = "PLAYLIST"
                     self.current_status = "PLAYING"
 

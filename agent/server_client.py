@@ -69,6 +69,7 @@ class ServerClient:
 
     def _on_command(self, data):
         t = data.get("type")
+        logger.info(f"[Socket] Command received: {data}")
 
         if t == "PLAYLIST_UPDATE" and self.on_playlist_update:
             logger.info(

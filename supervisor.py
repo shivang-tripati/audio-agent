@@ -5,12 +5,13 @@ Runs inside the service. Restarts worker if it crashes.
 
 import subprocess
 import sys
-import time
 import logging
 import os
+import threading
 from pathlib import Path
 
 from utils.logger import setup_logging
+from utils.single_instance import SingleInstance
 setup_logging("supervisor")
 logger = logging.getLogger(__name__)
 
@@ -77,45 +78,76 @@ def run_supervisor():
 
     consecutive_failures = 0
     MAX_CONSECUTIVE_FAILURES = 10
+    RESTART_DELAY = 3       # crash restart
+    STANDBY_DELAY = 60      # clean exit (e.g. device not activated) re-check
 
-    while True:
+    shutdown = threading.Event()
+
+    while not shutdown.is_set():
         try:
-            cmd = get_worker_command()
-            logger.info(f"Launching worker: {cmd}")
+            # One supervisor per machine. Without this the Windows service and
+            # a manually launched AudioAgent.exe (the installer puts one on
+            # the desktop) each spawned their own worker.
+            instance = SingleInstance(mode="service", wait=True,
+                                      stop_check=shutdown.is_set)
+            if not instance.acquired:
+                return
 
-            worker = subprocess.Popen(
-                cmd,
-                cwd=app_dir,              # explicit CWD for worker too
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-            )
+            try:
+                while not shutdown.is_set():
+                    cmd = get_worker_command()
+                    logger.info(f"Launching worker: {cmd}")
 
-            exit_code = worker.wait()
+                    worker = subprocess.Popen(
+                        cmd,
+                        cwd=app_dir,              # explicit CWD for worker too
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+                    )
 
-            if exit_code == 0:
-                logger.info("Worker exited cleanly (code=0)")
-                consecutive_failures = 0
-            else:
-                consecutive_failures += 1
-                logger.error(
-                    f"Worker exited unexpectedly (code={exit_code}). "
-                    f"Failure {consecutive_failures}/{MAX_CONSECUTIVE_FAILURES}"
-                )
+                    exit_code = worker.wait()
 
-            # If worker keeps crashing back to back, slow down restarts
-            # to avoid hammering the system
-            if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
-                logger.error("Too many consecutive failures — waiting 60s before retry")
-                time.sleep(60)
-                consecutive_failures = 0
-            else:
-                time.sleep(3)
+                    if exit_code == SingleInstance.DUPLICATE_EXIT_CODE:
+                        logger.error(
+                            "Another worker already owns this device "
+                            f"(code={exit_code}). Supervisor will not start "
+                            "a second one.")
+                        return
+
+                    if exit_code == 0:
+                        logger.info(
+                            "Worker exited cleanly (expected shutdown). "
+                            f"Standing by {STANDBY_DELAY}s before re-check.")
+                        consecutive_failures = 0
+                        if shutdown.wait(STANDBY_DELAY):
+                            return
+                    else:
+                        consecutive_failures += 1
+                        logger.error(
+                            f"Worker exited unexpectedly (code={exit_code}). "
+                            f"Failure {consecutive_failures}/{MAX_CONSECUTIVE_FAILURES}"
+                        )
+                        if shutdown.wait(RESTART_DELAY):
+                            return
+
+                    # If worker keeps crashing back to back, slow down restarts
+                    # to avoid hammering the system
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                        logger.error("Too many consecutive failures — waiting 60s before retry")
+                        if shutdown.wait(60):
+                            return
+                        consecutive_failures = 0
+
+            finally:
+                instance.release()
 
         except FileNotFoundError as e:
             logger.error(f"Worker executable not found: {e}")
-            time.sleep(30)  # wait longer — this won't fix itself quickly
+            if shutdown.wait(30):  # wait longer — this won't fix itself quickly
+                return
 
         except Exception as e:
             logger.exception(f"Supervisor error: {e}")
-            time.sleep(5)
+            if shutdown.wait(5):
+                return

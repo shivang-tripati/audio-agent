@@ -134,19 +134,27 @@ class PlaylistEngine:
     def start(self):
         logger.info("[Playlist] start() called")
         """Start playlist from current index"""
-        if self._is_running:
-            return
         with self._lock:
+            # One play loop per engine. The check has to happen under the lock:
+            # update_playlist() (socket thread), resume_from_schedule()
+            # (schedule thread) and POST /playlist/start (http thread) all call
+            # this, and two of them passing an unlocked check started two loops
+            # that drove the same player at the same time.
+            if self._is_running:
+                logger.info("[Playlist] Already running — not starting another loop")
+                return
+
             if not self._playlist:
                 logger.warning("[Playlist] No tracks to play")
                 return
 
-        self._is_running = True
-        self._is_paused = False
-        self._stop_event.clear()
-        self._skip_event.clear()
-        self._thread = threading.Thread(target=self._play_loop, daemon=True)
-        self._thread.start()
+            self._is_running = True
+            self._is_paused = False
+            self._stop_event.clear()
+            self._skip_event.clear()
+            self._thread = threading.Thread(target=self._play_loop, daemon=True)
+            self._thread.start()
+
         logger.info("[Playlist] Engine started")
 
         if self.on_state_change:
@@ -158,7 +166,31 @@ class PlaylistEngine:
         self._stop_event.set()
         self._skip_event.set()
         self.audio_controller.stop()
+        # Join before returning: an orphan loop would resume as soon as
+        # start() sets _is_running back to True, giving two loops again.
+        thread = self._thread
+        if thread and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=3)
+            if thread.is_alive():
+                logger.warning("[Playlist] Play loop did not exit in time")
+        self._thread = None
         logger.info("[Playlist] Engine stopped")
+
+    def pause(self):
+        """Pause playback from tray UI — freeze VLC at current position."""
+        if not self._is_running:
+            return
+        self._is_paused = True
+        self.audio_controller.pause()
+        logger.info("[Playlist] Paused by user")
+
+    def resume(self):
+        """Resume playback from tray UI."""
+        if not self._is_running:
+            return
+        self._is_paused = False
+        self.audio_controller.resume()
+        logger.info("[Playlist] Resumed by user")
 
     def pause_for_schedule(self) -> PlaylistState:
         """
@@ -228,6 +260,17 @@ class PlaylistEngine:
 
         if not self._is_running:
             self.start()
+
+    def get_state_name(self) -> str:
+        """
+        Real engine state: PLAYING / PAUSED / IDLE.
+
+        Used by the local API so /status and the pause/resume responses report
+        what the engine is actually doing instead of what the caller assumed.
+        """
+        if not self._is_running:
+            return "IDLE"
+        return "PAUSED" if self._is_paused else "PLAYING"
 
     def get_current_state(self) -> dict:
         """For heartbeat reporting"""

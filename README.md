@@ -134,10 +134,36 @@ The Windows Audio Agent is a lightweight, reliable background application that:
    python main.py
    ```
 
-4. **Build executable**
+4. **Build executables + installer**
    ```bash
    build.bat
    ```
+```bash
+:: worker + supervisor (one-dir: exe + _internal\ with VLC)
+pyinstaller --noconfirm --clean AudioAgent.spec
+
+:: Windows service
+pyinstaller --noconfirm --clean WindowsService.spec
+
+:: tray UI
+pyinstaller --noconfirm --clean Ui.spec
+Output:
+- dist\AudioAgent\AudioAgent.exe + dist\AudioAgent\_internal\
+- dist\AudioAgentService.exe
+- dist\AudioAgentUI.exe
+The installer needs all three in one folder, so if you're building manually also stage them:
+copy /Y dist\AudioAgentService.exe dist\AudioAgent\
+copy /Y dist\AudioAgentUI.exe      dist\AudioAgent\
+mkdir AudioAgentInstaller\dist\AudioAgent
+xcopy dist\AudioAgent\* AudioAgentInstaller\dist\AudioAgent\ /E /I /H /Y
+Then compile the installer:
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" AudioAgentInstaller\installer.iss
+:: -> AudioAgentInstaller\output\AudioAgentSetup_2.1.0.exe
+Or just run build.bat, which does all of the above and checks each step.
+```
+
+   See [Building from Source](#dY--building-from-source) for the three-spec
+   workflow.
 
 ## 📁 Project Structure
 
@@ -253,7 +279,8 @@ Example:
 
 - Windows 10/11
 - Python 3.9+
-- VLC Media Player
+- [Inno Setup 6](https://jrsoftware.org/isinfo.php) — only needed to compile the
+  installer (the three executables build without it)
 
 ### Build Steps
 
@@ -261,17 +288,56 @@ Example:
 # Install dependencies
 pip install -r requirements.txt
 
-# Run build script
+# Build everything (three executables + staged installer payload)
 build.bat
 ```
 
-Output: `dist\AudioAgent.exe`
+The build uses the three committed PyInstaller spec files — it never regenerates
+or deletes them:
 
-### Manual Build
+| Spec | Output | Role |
+|---|---|---|
+| `AudioAgent.spec` | `dist\AudioAgent\AudioAgent.exe` + `dist\AudioAgent\_internal\` | worker + supervisor (one-directory layout, bundles the VLC runtime) |
+| `WindowsService.spec` | `dist\AudioAgentService.exe` | Windows service |
+| `Ui.spec` | `dist\AudioAgentUI.exe` | tray UI |
+
+`build.bat` then copies the service and tray executables into
+`dist\AudioAgent\`, mirrors that folder into
+`AudioAgentInstaller\dist\AudioAgent\` (where `installer.iss` reads its
+payload from), verifies that the three executables and
+`_internal\vlc\libvlc.dll` are present, and compiles the installer with
+`ISCC.exe` into `AudioAgentInstaller\output\AudioAgentSetup_<version>.exe`.
+If Inno Setup is not installed the binaries are still built and the script says
+so explicitly instead of failing silently.
+
+To build a specific executable by hand:
 
 ```bash
-pyinstaller --onefile --noconsole --name AudioAgent main.py
+pyinstaller --noconfirm --clean AudioAgent.spec
+pyinstaller --noconfirm --clean WindowsService.spec
+pyinstaller --noconfirm --clean Ui.spec
 ```
+
+Release versioning lives in `AudioAgentInstaller\installer.iss`
+(`#define MyAppVersion`); the installer file name is derived from it.
+
+Building only writes to `build\`, `dist\` and `AudioAgentInstaller\dist|output`.
+It never touches `%ProgramData%\AudioAgent` (activation config, cached audio,
+logs).
+
+### Installing an upgrade
+
+The installer stops `AudioAgentService` gracefully (`sc stop` + a bounded wait
+for `STOPPED`, then a bounded wait for the `AudioAgent.exe` worker to exit)
+before it replaces any binary, and starts the service again afterwards with the
+result verified. This matters because the service is configured with
+`sc failure ... actions= restart/5000`: force-killing it used to make the SCM
+resurrect the old instance a few seconds later, while the new files were still
+being copied, which could leave two service instances — and two audio workers —
+running at once.
+
+If the service cannot be stopped the installer aborts with instructions instead
+of force-killing it.
 
 ## 🔒 Security
 

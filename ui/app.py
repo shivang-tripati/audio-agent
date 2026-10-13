@@ -29,44 +29,49 @@ def service_running():
 
 
 def main():
-    # Prevent duplicate tray instances
+    # Prevent duplicate tray instances. The mutex is per user session, so a
+    # second AudioAgentUI.exe launch exits here (DUPLICATE_EXIT_CODE) instead of
+    # starting another tray icon, poller thread and status panel.
     instance = SingleInstance(mode="ui")
 
-    config = ConfigManager()
-
-    # Device not activated → show activation window first
-    if not config.token:
-        ActivationWindow().run()
-
+    try:
         config = ConfigManager()
+
+        # Device not activated → show activation window first
         if not config.token:
-            instance.release()
-            return
+            ActivationWindow().run()
 
-    # Start service if not already running
-    if not service_running():
-        logger.info("Service not running — attempting to start...")
-        try:
-            subprocess.run(
-                ["sc", "start", "AudioAgentService"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            # Wait up to 10 seconds for service to come up
-            for _ in range(10):
-                time.sleep(1)
-                if service_running():
-                    logger.info("Service started successfully")
-                    break
-            else:
-                logger.warning("Service did not respond after 10s — continuing anyway")
-        except Exception as e:
-            logger.error(f"Failed to start service: {e}")
+            config = ConfigManager()
+            if not config.token:
+                return
 
-    # Start tray UI — blocks until user exits
-    TrayApp().start()
+        # Start service if not already running
+        if not service_running():
+            logger.info("Service not running — attempting to start...")
+            try:
+                subprocess.run(
+                    ["sc", "start", "AudioAgentService"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                # Wait up to 10 seconds for service to come up
+                for _ in range(10):
+                    time.sleep(1)
+                    if service_running():
+                        logger.info("Service started successfully")
+                        break
+                else:
+                    logger.warning("Service did not respond after 10s — continuing anyway")
+            except Exception as e:
+                logger.error(f"Failed to start service: {e}")
 
-    instance.release()
+        # Start tray UI — blocks until user exits
+        TrayApp().start()
+
+    finally:
+        # Released on every exit path so a relaunch is not rejected by our own
+        # mutex after a crash.
+        instance.release()
 
 
 if __name__ == "__main__":

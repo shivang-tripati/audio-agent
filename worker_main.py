@@ -72,8 +72,16 @@ from utils.single_instance import SingleInstance
 def run_worker():
     logger.info(f"Worker starting — PID={os.getpid()}")
 
+    # Exits with SingleInstance.DUPLICATE_EXIT_CODE if another worker owns
+    # this device. Acquired before any playback resource is created and held
+    # for the whole worker lifetime (released in the finally below).
     instance = SingleInstance(mode="worker")
 
+    if not instance.acquired:
+        logger.error("Worker did not acquire the device mutex — exiting")
+        return 2
+
+    agent = None
     try:
         while True:
             try:
@@ -87,6 +95,17 @@ def run_worker():
 
             except Exception as e:
                 logger.exception(f"Worker crashed: {e}")
+
+            finally:
+                # Release everything this worker owns before another agent is
+                # built in the same process: a second AudioController would
+                # mean a second VLC instance playing on the same output.
+                if agent is not None:
+                    try:
+                        agent.stop()
+                    except Exception as e:
+                        logger.error(f"Error stopping agent: {e}")
+                    agent = None
 
             from config_manager import ConfigManager
             if not ConfigManager().token:

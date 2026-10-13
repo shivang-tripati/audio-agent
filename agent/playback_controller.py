@@ -77,6 +77,14 @@ class PlaybackController:
 
             return started
 
+    def pause(self):
+        with self.lock:
+            self.audio_controller.pause()
+
+    def resume(self):
+        with self.lock:
+            self.audio_controller.resume()
+
     # --------------------------------------------------
     # Stop playback
     # --------------------------------------------------

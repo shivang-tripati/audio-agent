@@ -11,6 +11,7 @@ import win32event
 import servicemanager
 
 from utils.logger import setup_logging
+from utils.single_instance import SingleInstance
 
 setup_logging("service")
 logger = logging.getLogger(__name__)
@@ -53,10 +54,18 @@ class AudioAgentService(win32serviceutil.ServiceFramework):
     _svc_display_name_ = "Audio Agent Service"
     _svc_description_ = "Cloud Audio Scheduler Agent"
 
+    RESTART_DELAY = 5        # crash restart
+    STANDBY_DELAY = 60       # clean exit (e.g. device not activated) re-check
+
     def __init__(self, args):
         win32serviceutil.ServiceFramework.__init__(self, args)
         self.stop_event = win32event.CreateEvent(None, 0, 0, None)
         self.process = None
+        self.instance = None
+
+    def _stopping(self):
+        return win32event.WaitForSingleObject(
+            self.stop_event, 0) == win32event.WAIT_OBJECT_0
 
     def SvcDoRun(self):
         try:
@@ -73,6 +82,18 @@ class AudioAgentService(win32serviceutil.ServiceFramework):
             logger.info(f"Worker cmd: {cmd}")
             logger.info(f"Worker exists: {os.path.exists(cmd[0])}")
 
+            # Only one service instance may own a worker. SCM recovery
+            # (sc failure ... restart/5000) and installer taskkill can start a
+            # second instance while the first is still alive; without this the
+            # second instance spawned its own worker and both played audio.
+            self.instance = SingleInstance(
+                mode="service", wait=True, stop_check=self._stopping)
+
+            if not self.instance.acquired:
+                logger.info("Service shutting down before owning the worker lock")
+                self.ReportServiceStatus(win32service.SERVICE_STOPPED)
+                return
+
             self.process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
@@ -81,7 +102,7 @@ class AudioAgentService(win32serviceutil.ServiceFramework):
             )
 
             self.ReportServiceStatus(win32service.SERVICE_RUNNING)
-            logger.info("AudioAgent Service running")
+            logger.info(f"AudioAgent Service running (worker PID={self.process.pid})")
 
             self._monitor_worker()
 
@@ -89,56 +110,87 @@ class AudioAgentService(win32serviceutil.ServiceFramework):
             logger.exception("Service SvcDoRun failed")
             servicemanager.LogErrorMsg(f"AudioAgent Service failed: {str(e)}")
             self.ReportServiceStatus(win32service.SERVICE_STOPPED)
+        finally:
+            self._cleanup()
+
+    def _wait_stop(self, seconds):
+        """Wait on the stop event. Returns True if shutdown was requested."""
+        return win32event.WaitForSingleObject(
+            self.stop_event, int(seconds * 1000)) == win32event.WAIT_OBJECT_0
+
+    def _cleanup(self):
+        self._terminate_worker()
+        if self.instance:
+            self.instance.release()
+            self.instance = None
+
+    def _terminate_worker(self):
+        proc = self.process
+        self.process = None
+        if not proc or proc.poll() is not None:
+            return
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=5)
+                logger.warning("Worker force-killed after timeout")
+        except Exception as e:
+            logger.error(f"Failed to stop worker: {e}")
 
     def _monitor_worker(self):
-        RESTART_DELAY = 5
+        while not self._wait_stop(1):
+            if not self.process or self.process.poll() is None:
+                continue
 
-        while True:
-            result = win32event.WaitForSingleObject(self.stop_event, 1000)
+            exit_code = self.process.returncode
+            self.process = None
 
-            if result == win32event.WAIT_OBJECT_0:
-                logger.info("Stop event received — exiting monitor loop")
-                break
+            if exit_code == SingleInstance.DUPLICATE_EXIT_CODE:
+                logger.error(
+                    "Another worker already owns this device (code="
+                    f"{exit_code}). Service will not start a second one.")
+                return
 
-            if self.process and self.process.poll() is not None:
-                exit_code = self.process.returncode
-                logger.error(f"Worker exited (code={exit_code}). Restarting in {RESTART_DELAY}s...")
+            if exit_code == 0:
+                logger.info(
+                    "Worker exited cleanly (expected shutdown). "
+                    f"Standing by {self.STANDBY_DELAY}s before re-check.")
+                if self._wait_stop(self.STANDBY_DELAY):
+                    return
+            else:
+                logger.error(
+                    f"Worker exited unexpectedly (code={exit_code}). "
+                    f"Restarting in {self.RESTART_DELAY}s...")
+                if self._wait_stop(self.RESTART_DELAY):
+                    return
 
-                stop_during_wait = win32event.WaitForSingleObject(
-                    self.stop_event, RESTART_DELAY * 1000
+            try:
+                cmd = _get_worker_command()
+                self.process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW
                 )
-                if stop_during_wait == win32event.WAIT_OBJECT_0:
-                    break
-
-                try:
-                    cmd = _get_worker_command()
-                    self.process = subprocess.Popen(
-                        cmd,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        creationflags=subprocess.CREATE_NO_WINDOW
-                    )
-                    logger.info("Worker restarted successfully")
-                except Exception as e:
-                    logger.error(f"Failed to restart worker: {e}")
+                logger.info(f"Worker restarted (PID={self.process.pid})")
+            except Exception as e:
+                logger.error(f"Failed to restart worker: {e}")
 
     def SvcStop(self):
         self.ReportServiceStatus(win32service.SERVICE_STOP_PENDING)
         servicemanager.LogInfoMsg("AudioAgent Service stopping")
         logger.info("AudioAgent Service stopping")
 
-        if self.process and self.process.poll() is None:
-            try:
-                self.process.terminate()
-                try:
-                    self.process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
-                    logger.warning("Worker force-killed after timeout")
-            except Exception as e:
-                logger.error(f"Failed to stop worker: {e}")
-
+        # Signal first: the monitor loop must not respawn a worker while we
+        # are tearing the current one down (that left an orphaned worker
+        # holding the device mutex and playing audio).
         win32event.SetEvent(self.stop_event)
+
+        self._terminate_worker()
+
         self.ReportServiceStatus(win32service.SERVICE_STOPPED)
         logger.info("AudioAgent Service stopped")
 

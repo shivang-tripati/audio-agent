@@ -88,6 +88,12 @@ class AudioController:
         self.is_playing = False
         self.current_audio_name = None
 
+        # Monotonic session id. Bumped on every play() and stop() so a monitor
+        # thread left over from a previous session can tell that it is stale
+        # and must not touch state or fire callbacks for the current one.
+        self._session = 0
+        self._session_lock = threading.Lock()
+
         # --------------------------------------------------
         # FIX #4: Two flags to prevent race condition
         #
@@ -188,6 +194,12 @@ class AudioController:
         try:
             logger.info("Restarting VLC instance for stability")
 
+            # Swap the player under the old monitor thread — invalidate its
+            # session so it cannot report the new player's state.
+            with self._session_lock:
+                self._session += 1
+            self.stop_monitoring = True
+
             if self.player:
                 try:
                     self.player.stop()
@@ -255,13 +267,12 @@ class AudioController:
                     self.player.set_time(seek_ms)
                     logger.info(f"Seeked to {seek_ms}ms for audio: {audio_name}")
 
-                self.is_playing = True
-                self.current_audio_name = audio_name
+                session = self._begin_session(audio_name)
 
                 if self.on_playback_start:
                     self.on_playback_start(audio_name)
 
-                self._start_monitoring(audio_name)
+                self._start_monitoring(audio_name, session)
                 return True
 
             raise RuntimeError(f"VLC failed to start, state={state}")
@@ -272,6 +283,18 @@ class AudioController:
                 self.on_playback_error(audio_name, str(e))
             return False
 
+    def _begin_session(self, audio_name):
+        """Open a new playback session, invalidating any previous one."""
+        with self._session_lock:
+            self._session += 1
+            self.is_playing = True
+            self.current_audio_name = audio_name
+            return self._session
+
+    def _is_current_session(self, session):
+        with self._session_lock:
+            return session == self._session
+
     def stop(self):
         """
         Stop current playback.
@@ -281,38 +304,48 @@ class AudioController:
         and already read State.Ended, it will NOT fire on_playback_end.
 
         Order matters:
-          1. suppress flag ON
-          2. stop_monitoring ON
-          3. VLC stop
-          4. join thread
-          5. reset state
-          6. suppress flag OFF  ← only after thread is fully dead
+          1. invalidate the session (stale monitors become no-ops)
+          2. suppress flag ON
+          3. stop_monitoring ON
+          4. VLC stop
+          5. join thread
+          6. reset state
+          7. suppress flag OFF  ← only after thread is fully dead
         """
-        if self.is_playing:
-            logger.info(f"Stopping playback: {self.current_audio_name}")
-
-            # Step 1 & 2: Set flags BEFORE stopping VLC
-            self._suppress_end_cb = True
-            self.stop_monitoring = True
-
-            # Step 3: Stop VLC
-            try:
-                self.player.stop()
-            except Exception:
-                pass
-
-            # Step 4: Wait for monitor thread to fully exit
-            if self.monitor_thread and self.monitor_thread.is_alive():
-                self.monitor_thread.join(timeout=2)
-                if self.monitor_thread.is_alive():
-                    logger.warning("Monitor thread did not exit in time")
-
-            # Step 5: Reset state
+        # Invalidate first: a monitor thread that survives step 5 must not be
+        # able to clear is_playing or fire a callback for this session.
+        with self._session_lock:
+            self._session += 1
+            session_open = self.is_playing
             self.is_playing = False
             self.current_audio_name = None
 
-            # Step 6: Clear suppress flag AFTER thread is dead
-            self._suppress_end_cb = False
+        if session_open:
+            logger.info("Stopping playback")
+
+        # Step 2 & 3: Set flags BEFORE stopping VLC
+        self._suppress_end_cb = True
+        self.stop_monitoring = True
+
+        # Step 4: Stop VLC. Always issued — is_playing can be stale, and a
+        # player left running would keep the old track audible under the new
+        # one (play() calls stop() before swapping media).
+        try:
+            self.player.stop()
+        except Exception:
+            pass
+
+        # Step 5: Wait for monitor thread to fully exit
+        if self.monitor_thread and self.monitor_thread.is_alive():
+            self.monitor_thread.join(timeout=2)
+            if self.monitor_thread.is_alive():
+                logger.warning("Monitor thread did not exit in time")
+
+        # Step 6: state already cleared above
+        self.monitor_thread = None
+
+        # Step 7: Clear suppress flag AFTER thread is dead
+        self._suppress_end_cb = False
 
     def set_volume(self, volume_percent):
         volume_percent = max(0, min(100, volume_percent))
@@ -349,22 +382,38 @@ class AudioController:
     # Monitoring
     # --------------------------------------------------
 
-    def _start_monitoring(self, audio_name):
+    def _start_monitoring(self, audio_name, session=None):
         self.stop_monitoring = False
         self._suppress_end_cb = False  # always clear before starting fresh
+        if session is None:
+            with self._session_lock:
+                session = self._session
         self.monitor_thread = threading.Thread(
             target=self._monitor_playback,
-            args=(audio_name,),
+            args=(audio_name, session),
             daemon=True
         )
         self.monitor_thread.start()
 
-    def _monitor_playback(self, audio_name):
+    def _monitor_playback(self, audio_name, session=None):
+        if session is None:
+            with self._session_lock:
+                session = self._session
         while not self.stop_monitoring:
+            if not self._is_current_session(session):
+                logger.info(
+                    f"[Monitor] stale session for {audio_name} — abandoning")
+                return
             try:
                 state = self.player.get_state()
 
                 if state in (vlc.State.Ended, vlc.State.Stopped):
+                    if not self._is_current_session(session):
+                        logger.info(
+                            f"[Monitor] stale session for {audio_name} — "
+                            "not reporting completion of the current session")
+                        return
+
                     logger.info(f"Playback completed: {audio_name}")
                     self.is_playing = False
 
@@ -388,6 +437,8 @@ class AudioController:
 
             except Exception as e:
                 logger.error(f"Playback monitor error: {e}")
+                if not self._is_current_session(session):
+                    return
                 self.is_playing = False
                 if not self._suppress_end_cb and self.on_playback_error:
                     self.on_playback_error(audio_name, str(e))
